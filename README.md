@@ -16,7 +16,7 @@ A security-enhanced command-line utility for securely storing and using API cred
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/api_creds.git
+git clone https://github.com/ngc-shj/api_creds.git
 
 # Make the script executable
 chmod +x api_creds/api_creds
