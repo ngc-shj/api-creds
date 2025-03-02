@@ -1,0 +1,1104 @@
+#!/bin/bash
+
+# AI API Credentials Manager
+# This script manages various AI API credentials and sets them as environment variables
+# with improved security features
+
+# Exit on error and undefined variables (but don't use for sourcing compatibility)
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    set -euo pipefail
+fi
+
+# XDG compliant config paths
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+CONFIG_DIR="${XDG_CONFIG_HOME}/api_creds"
+DATA_DIR="${XDG_DATA_HOME}/api_creds"
+STATE_DIR="${XDG_STATE_HOME}/api_creds"
+CRED_FILE="${CONFIG_DIR}/credentials.enc"  # Encrypted file
+KEY_FILE="${DATA_DIR}/.master.key"  # Master key file
+LOG_FILE="${STATE_DIR}/api_creds.log"  # Add logging
+
+# Create directories if they don't exist
+mkdir -p "${CONFIG_DIR}" "${DATA_DIR}" "${STATE_DIR}"
+
+# Logging function with timestamps
+log() {
+    local level="$1"
+    local message="$2"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[${timestamp}] [${level}] ${message}" >> "${LOG_FILE}"
+    
+    # Only print warnings and errors to stderr
+    if [ "$level" = "WARNING" ] || [ "$level" = "ERROR" ]; then
+        echo "[${level}] ${message}" >&2
+    fi
+}
+
+# Initialize log file with restricted permissions
+if [ ! -f "${LOG_FILE}" ]; then
+    touch "${LOG_FILE}"
+    chmod 600 "${LOG_FILE}"
+    log "INFO" "Log file created"
+fi
+
+# Function to securely create temporary files
+create_secure_temp() {
+    mktemp -t "api_creds.XXXXXX"
+}
+
+# Initialize encryption if needed
+init_encryption() {
+    if [ ! -f "${KEY_FILE}" ]; then
+        log "INFO" "Initializing encryption"
+        
+        # Generate a random master key (Base64)
+        openssl rand -base64 32 > "${KEY_FILE}"
+        
+        # Set strict permissions
+        chmod 600 "${KEY_FILE}"
+        
+        log "INFO" "Encryption initialized with new key"
+    fi
+    
+    # Create credentials file if it doesn't exist
+    if [ ! -f "${CRED_FILE}" ]; then
+        touch "${CRED_FILE}"
+        chmod 600 "${CRED_FILE}"  # Restrict permissions for security
+        log "INFO" "Credentials file created"
+    fi
+}
+
+# Encrypt the credentials file
+encrypt_file() {
+    local input_file="$1"
+    local output_file="$2"
+    local temp_output
+    temp_output=$(create_secure_temp)
+    
+    # Debug
+    log "DEBUG" "Encrypt: Input file=${input_file}, Output file=${output_file}"
+    
+    if [ ! -f "${input_file}" ]; then
+        log "ERROR" "Input file does not exist: ${input_file}"
+        return 1
+    fi
+    
+    # Check if input file has content
+    if [ ! -s "${input_file}" ]; then
+        log "ERROR" "Input file is empty, nothing to encrypt"
+        return 1
+    fi
+    
+    # Debug
+    local input_size
+    input_size=$(stat -f %z "${input_file}" 2>/dev/null || stat -c %s "${input_file}")
+    log "DEBUG" "Input file size: ${input_size} bytes"
+    
+    # Use OpenSSL with consistent parameters
+    log "INFO" "Encrypting credentials with OpenSSL"
+    
+    # Explicitly set all parameters for consistency
+    local encrypt_error
+    encrypt_error=$(openssl enc -aes-256-cbc \
+        -e \
+        -pbkdf2 \
+        -iter 10000 \
+        -md sha256 \
+        -in "${input_file}" \
+        -out "${temp_output}" \
+        -pass file:"${KEY_FILE}" 2>&1)
+        
+    local encrypt_status=$?
+    
+    if [ $encrypt_status -ne 0 ]; then
+        log "ERROR" "Encryption failed with status $encrypt_status: ${encrypt_error}"
+        if [ -f "${temp_output}" ]; then
+            shred -u "${temp_output}"
+        fi
+        return 1
+    fi
+    
+    # Verify encryption was successful by checking output file size
+    if [ ! -s "${temp_output}" ]; then
+        log "ERROR" "Encryption produced empty file"
+        if [ -f "${temp_output}" ]; then
+            shred -u "${temp_output}"
+        fi
+        return 1
+    fi
+    
+    # Debug output file
+    local output_size
+    output_size=$(stat -f %z "${temp_output}" 2>/dev/null || stat -c %s "${temp_output}")
+    log "DEBUG" "Encrypted file size: ${output_size} bytes"
+    
+    # Move the temp file to the actual output file
+    log "DEBUG" "Moving encrypted file to final destination"
+    mv "${temp_output}" "${output_file}"
+    
+    # Secure the encrypted file
+    chmod 600 "${output_file}"
+    
+    log "INFO" "Encryption successful: input size ${input_size} bytes, output size ${output_size} bytes"
+    
+    return 0
+}
+
+# Decrypt the credentials file
+decrypt_file() {
+    local input_file="$1"
+    local output_file="$2"
+    
+    # If the input file doesn't exist or is empty, create an empty output file
+    if [ ! -f "${input_file}" ] || [ ! -s "${input_file}" ]; then
+        log "INFO" "Credentials file is empty or does not exist, creating new one"
+        echo "# AI API Credentials file - encrypted when not in use" > "${output_file}"
+        return 0
+    fi
+    
+    log "INFO" "Decrypting credentials"
+    
+    # Use OpenSSL to decrypt with error capture - using same parameters as encryption
+    local decrypt_error
+    decrypt_error=$(openssl enc -aes-256-cbc \
+        -d \
+        -pbkdf2 \
+        -iter 10000 \
+        -md sha256 \
+        -in "${input_file}" \
+        -out "${output_file}" \
+        -pass file:"${KEY_FILE}" 2>&1)
+        
+    local decrypt_status=$?
+    if [ $decrypt_status -ne 0 ]; then
+        log "ERROR" "Decryption failed with status $decrypt_status: ${decrypt_error}"
+        echo "# Decryption failed - credentials file or key may be corrupted" > "${output_file}"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Display usage information
+usage() {
+    cat << EOF
+AI API Credentials Manager (Security Enhanced Version)
+Usage:
+  $(basename "$0") list                     - List all registered credentials
+  $(basename "$0") add <var_name> <value>   - Add a new credential
+  $(basename "$0") remove <var_name>        - Remove a credential
+  $(basename "$0") use <var_name>           - Set specified credential as environment variable
+  $(basename "$0") run <var_name(s)> <cmd>  - Run command with one or more credentials
+  $(basename "$0") export                   - Display commands to export all credentials
+  $(basename "$0") completion [shell] - Setup tab completion (bash or zsh)
+  $(basename "$0") rotate-key               - Rotate encryption key (recommended periodically)
+
+Examples:
+  $(basename "$0") add OPENAI_API_KEY sk-abcdef123456
+  $(basename "$0") add HUGGING_FACE_HUB_TOKEN hf_ghijkl789012
+  $(basename "$0") add OPENAI_ORGANIZATION org-mnopqr345678
+  $(basename "$0") use OPENAI_API_KEY
+  $(basename "$0") run OPENAI_API_KEY python my_script.py
+  $(basename "$0") run OPENAI_API_KEY OPENAI_ORGANIZATION python my_script.py
+EOF
+    exit 1
+}
+
+# List all credentials
+list_creds() {
+    log "INFO" "Listing credentials"
+    local temp_file
+    temp_file=$(create_secure_temp)
+    
+    # Decrypt the credentials file
+    if decrypt_file "${CRED_FILE}" "${temp_file}"; then
+        echo "Registered credentials:"
+        if [ -s "${temp_file}" ]; then
+            grep -v -e "^#" -e "^$" "${temp_file}" | while IFS= read -r line; do
+                # Extract variable name but not the value
+                var_name=$(echo "${line}" | cut -d= -f1)
+                echo "  ${var_name}"
+            done
+        else
+            echo "  No credentials registered."
+        fi
+    else
+        echo "  No credentials registered or unable to decrypt credentials file."
+    fi
+    
+    # Securely remove the temporary file
+    shred -u "${temp_file}"
+}
+
+# Add a new credential
+add_cred() {
+    # Check for required variable name
+    if [ -z "${1:-}" ]; then
+        log "ERROR" "Missing variable name"
+        echo "Error: Please specify variable name."
+        usage
+    fi
+    
+    local var_name="$1"
+    local value=""
+    local temp_file
+    temp_file=$(create_secure_temp)
+    
+    # If second argument is provided, use it (legacy mode)
+    # Otherwise, prompt for secure input
+    if [ -n "${2:-}" ]; then
+        log "WARNING" "Using command line arguments for API keys may expose them in shell history"
+        echo "WARNING: Adding API keys via command line arguments leaves them in your shell history!"
+        echo "Consider using the interactive mode instead (omit the key value)."
+        value="$2"
+    else
+        # Interactive secure input mode
+        echo "Enter value for ${var_name} (input will not be displayed):"
+        read -r -s value  # -s flag hides the input
+        echo  # Add a newline after hidden input
+        
+        # Verify non-empty input
+        if [ -z "$value" ]; then
+            log "ERROR" "Empty credential value provided"
+            echo "Error: Empty value provided. Credential not added."
+            shred -u "${temp_file}"
+            return 1
+        fi
+    fi
+    
+    log "INFO" "Adding credential for ${var_name}"
+    
+    # Decrypt the credentials file or create new if needed
+    log "INFO" "Preparing credentials file"
+    if [ ! -s "${CRED_FILE}" ]; then
+        # File doesn't exist or is empty - create new file
+        echo "# AI API Credentials file - encrypted when not in use" > "${temp_file}"
+        echo "# Created: $(date)" >> "${temp_file}" 
+        echo "# Warning: Do not edit this file directly" >> "${temp_file}"
+        echo "" >> "${temp_file}"
+        log "INFO" "Created new credentials file"
+    else
+        # Decrypt existing file
+        if ! decrypt_file "${CRED_FILE}" "${temp_file}"; then
+            log "ERROR" "Failed to decrypt existing credentials"
+            echo "Error: Could not access existing credentials. Check your encryption setup."
+            shred -u "${temp_file}"
+            return 1
+        fi
+    fi
+    
+    # Update if already exists
+    if grep -q "^${var_name}=" "${temp_file}" 2>/dev/null; then
+        sed -i.bak "s|^${var_name}=.*|${var_name}=\"${value}\"|" "${temp_file}" && rm -f "${temp_file}.bak"
+        log "INFO" "Updated credential for ${var_name}"
+        echo "Updated credential for ${var_name}."
+    else
+        echo "${var_name}=\"${value}\"" >> "${temp_file}"
+        log "INFO" "Added credential for ${var_name}"
+        echo "Added credential for ${var_name}."
+    fi
+    
+    # Double check the temp file has content
+    if [ ! -s "${temp_file}" ]; then
+        log "ERROR" "Temp file is empty after adding credential - cannot proceed with encryption"
+        echo "Error: Failed to add credential due to file system error."
+        shred -u "${temp_file}"
+        return 1
+    fi
+    
+    # Show debug info about the temp file
+    local temp_size
+    temp_size=$(stat -f %z "${temp_file}" 2>/dev/null || stat -c %s "${temp_file}")
+    log "DEBUG" "Temp file size before encryption: ${temp_size} bytes"
+    
+    # Encrypt the credentials
+    log "INFO" "Encrypting updated credentials"
+    if encrypt_file "${temp_file}" "${CRED_FILE}"; then
+        log "INFO" "Encryption completed successfully"
+    else
+        log "ERROR" "Failed to encrypt credentials"
+        echo "Warning: Credential was added but encryption failed. Your credential may not be secure."
+    fi
+    
+    # Securely remove the temporary file
+    shred -u "${temp_file}"
+}
+
+# Remove a credential
+remove_cred() {
+    if [ -z "${1:-}" ]; then
+        log "ERROR" "Missing variable name to remove"
+        echo "Error: Please specify the variable name to remove."
+        usage
+    fi
+    
+    local var_name="$1"
+    local temp_file
+    temp_file=$(create_secure_temp)
+    
+    log "INFO" "Removing credential for ${var_name}"
+    
+    # Decrypt the credentials file
+    if decrypt_file "${CRED_FILE}" "${temp_file}"; then
+        if grep -q "^${var_name}=" "${temp_file}" 2>/dev/null; then
+            sed -i.bak "/^${var_name}=/d" "${temp_file}" && rm -f "${temp_file}.bak"
+            log "INFO" "Removed credential for ${var_name}"
+            echo "Removed credential for ${var_name}."
+            
+            # Encrypt and save the updated credentials
+            encrypt_file "${temp_file}" "${CRED_FILE}"
+        else
+            log "WARNING" "No credential registered for ${var_name}"
+            echo "Error: No credential registered for ${var_name}."
+        fi
+    else
+        log "ERROR" "Failed to decrypt credentials file"
+        echo "Error: Failed to access credentials."
+    fi
+    
+    # Securely remove the temporary file
+    shred -u "${temp_file}"
+}
+
+# Set specified credential as environment variable
+use_cred() {
+    if [ -z "${1:-}" ]; then
+        log "ERROR" "Missing variable name to use"
+        echo "Error: Please specify the credential variable name to use." >&2
+        # Don't call usage when being sourced as it will exit the shell
+        if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+            usage
+        fi
+        return 1
+    fi
+    
+    local var_name="$1"
+    local temp_file
+    temp_file=$(create_secure_temp)
+    
+    log "INFO" "Setting ${var_name} as environment variable"
+    
+    # Decrypt the credentials file
+    if decrypt_file "${CRED_FILE}" "${temp_file}"; then
+        if grep -q "^${var_name}=" "${temp_file}" 2>/dev/null; then
+            # Extract the credential value
+            cred_line=$(grep "^${var_name}=" "${temp_file}")
+            
+            # Check if script is being sourced
+            if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+                # Script is being sourced, can directly modify environment
+                eval "${cred_line}"
+                log "INFO" "Successfully set ${var_name} as environment variable (sourced mode)"
+                echo "Set ${var_name} as environment variable."
+            else
+                # Script is not sourced, output for eval
+                echo "export ${cred_line}"
+                log "INFO" "Outputting export command for ${var_name}"
+            fi
+        else
+            log "WARNING" "No credential registered for ${var_name}"
+            echo "Error: No credential registered for ${var_name}." >&2
+            if [ -f "${temp_file}" ]; then
+                shred -u "${temp_file}"
+            fi
+            return 1
+        fi
+    else
+        log "ERROR" "Failed to decrypt credentials file"
+        echo "Error: Failed to access credentials." >&2
+        if [ -f "${temp_file}" ]; then
+            shred -u "${temp_file}"
+        fi
+        return 1
+    fi
+    
+    # Securely remove the temporary file
+    if [ -f "${temp_file}" ]; then
+        shred -u "${temp_file}"
+    fi
+    
+    return 0
+}
+
+# Run command with specified credentials
+run_with_multiple_creds() {
+    if [ -z "${1:-}" ]; then
+        log "ERROR" "No credentials or command specified"
+        echo "Error: Please specify at least one credential and a command."
+        usage
+    fi
+    
+    log "INFO" "Running command with credentials"
+    
+    # Build environment string
+    local env_string=""
+    local creds=()
+    local cmd_start=0
+    local missing_creds=0
+    local temp_file
+    temp_file=$(create_secure_temp)
+    
+    # Decrypt the credentials file
+    if ! decrypt_file "${CRED_FILE}" "${temp_file}"; then
+        log "ERROR" "Failed to decrypt credentials file"
+        echo "Error: Failed to access credentials."
+        shred -u "${temp_file}"
+        return 1
+    fi
+    
+    # Parse arguments to find credential names
+    for (( i=1; i<=$#; i++ )); do
+        local arg="${!i}"
+        if grep -q "^${arg}=" "${temp_file}" 2>/dev/null; then
+            creds+=("$arg")
+        else
+            cmd_start=$i
+            break
+        fi
+    done
+    
+    if [ ${#creds[@]} -eq 0 ]; then
+        log "ERROR" "No valid credentials specified"
+        echo "Error: No valid credentials specified."
+        shred -u "${temp_file}"
+        usage
+    fi
+    
+    if [ $cmd_start -eq 0 ] || [ $cmd_start -gt $# ]; then
+        log "ERROR" "No command specified after credentials"
+        echo "Error: No command specified after credentials."
+        shred -u "${temp_file}"
+        usage
+    fi
+    
+    # Build environment file
+    echo "Using the following credentials:"
+    local env_file
+    env_file=$(create_secure_temp)
+    
+    for cred in "${creds[@]}"; do
+        if grep -q "^${cred}=" "${temp_file}" 2>/dev/null; then
+            local cred_line
+            cred_line=$(grep "^${cred}=" "${temp_file}")
+            echo "export ${cred_line}" >> "${env_file}"
+            echo "  - ${cred}: [value masked]"
+        else
+            echo "  - ${cred}: NOT FOUND (credential not registered)"
+            missing_creds=1
+        fi
+    done
+    
+    # Exit if any credentials were missing
+    if [ $missing_creds -eq 1 ]; then
+        log "ERROR" "Some credentials are missing"
+        echo "Error: Some credentials are missing. Please add them first."
+        shred -u "${temp_file}" "${env_file}"
+        exit 1
+    fi
+    
+    # Extract the command and arguments
+    local cmd_args=("${@:cmd_start}")
+    
+    echo "Running command: ${cmd_args[0]} ${cmd_args[@]:1}"
+    echo "-----------------------------------"
+    log "INFO" "Running command: ${cmd_args[0]}"
+    
+    # Source the environment file then run the command
+    # shellcheck disable=SC1090
+    (source "${env_file}" && "${cmd_args[@]}")
+    local exit_status=$?
+    
+    # Clean up temporary files
+    shred -u "${temp_file}" "${env_file}"
+    
+    if [ $exit_status -ne 0 ]; then
+        log "WARNING" "Command exited with status ${exit_status}"
+    else
+        log "INFO" "Command completed successfully"
+    fi
+    
+    return $exit_status
+}
+
+# Display commands to export all credentials
+export_creds() {
+    log "INFO" "Exporting credentials"
+    local temp_file
+    temp_file=$(create_secure_temp)
+    
+    # Decrypt the credentials file
+    if decrypt_file "${CRED_FILE}" "${temp_file}"; then
+        echo "# Copy and run the following commands or use 'source <($(basename "$0") export)':"
+        if [ -s "${temp_file}" ]; then
+            echo "# WARNING: This will expose your credentials in your shell history!"
+            echo "# Consider using the 'use' command for individual credentials"
+            echo ""
+            grep -v -e "^#" -e "^$" "${temp_file}" | while IFS= read -r line; do
+                echo "export ${line}"
+            done
+        else
+            echo "# No credentials registered."
+        fi
+    else
+        log "ERROR" "Failed to decrypt credentials file"
+        echo "Error: Failed to access credentials."
+    fi
+    
+    # Securely remove the temporary file
+    shred -u "${temp_file}"
+}
+
+# Get all registered credential names
+get_credential_names() {
+    local temp_file
+    temp_file=$(create_secure_temp)
+    
+    # Decrypt the credentials file
+    if decrypt_file "${CRED_FILE}" "${temp_file}"; then
+        grep -v "^#" "${temp_file}" | cut -d= -f1
+    fi
+    
+    # Securely remove the temporary file
+    shred -u "${temp_file}"
+}
+
+# Rotate encryption key
+rotate_key() {
+    log "INFO" "Rotating encryption key"
+    
+    # Decrypt credentials with old key
+    local temp_file
+    temp_file=$(create_secure_temp)
+    
+    if ! decrypt_file "${CRED_FILE}" "${temp_file}"; then
+        log "ERROR" "Failed to decrypt credentials with current key"
+        echo "Error: Failed to decrypt credentials with current key. Aborting key rotation."
+        shred -u "${temp_file}"
+        return 1
+    fi
+    
+    # Create backup of old key
+    local backup_suffix
+    backup_suffix=$(date +%Y%m%d%H%M%S)
+    cp "${KEY_FILE}" "${KEY_FILE}.${backup_suffix}.bak"
+    chmod 600 "${KEY_FILE}.${backup_suffix}.bak"
+    
+    # Generate new key
+    openssl rand -base64 32 > "${KEY_FILE}"
+    chmod 600 "${KEY_FILE}"
+    
+    # Re-encrypt with new key
+    if encrypt_file "${temp_file}" "${CRED_FILE}"; then
+        log "INFO" "Successfully rotated encryption key"
+        echo "Encryption key rotated successfully."
+        echo "Backup of previous key saved as ${KEY_FILE}.${backup_suffix}.bak"
+    else
+        log "ERROR" "Failed to re-encrypt with new key, restoring backup"
+        echo "Error: Failed to re-encrypt with new key. Restoring previous key."
+        
+        # Restore old key
+        cp "${KEY_FILE}.${backup_suffix}.bak" "${KEY_FILE}"
+        chmod 600 "${KEY_FILE}" 
+    fi
+    
+    # Securely remove the temporary file
+    shred -u "${temp_file}"
+}
+
+# Setup shell completion
+setup_completion() {
+    local SCRIPT_NAME
+    SCRIPT_NAME="$(basename "$0")"
+    
+    # Detect shell type
+    local SHELL_TYPE="${2:-}"
+    if [ -z "$SHELL_TYPE" ]; then
+        if [ -n "$ZSH_VERSION" ]; then
+            SHELL_TYPE="zsh"
+        else
+            SHELL_TYPE="bash"
+        fi
+    fi
+    
+    # When being sourced, only output the completion code without instructions
+    if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+        # Output completion code to standard output
+        echo "###-begin-${SCRIPT_NAME}-completion-###"
+        
+        if [ "$SHELL_TYPE" = "bash" ]; then
+            cat << BASH_COMPLETION
+# Bash completion for ${SCRIPT_NAME}
+if type complete &>/dev/null; then
+  _${SCRIPT_NAME}_completion() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="\${COMP_WORDS[COMP_CWORD]}"
+    prev="\${COMP_WORDS[COMP_CWORD-1]}"
+    
+    # Get credentials list (improved version)
+    _get_creds() {
+      ${SCRIPT_NAME} list 2>/dev/null | grep -v "^Registered" | grep -v "^[[:space:]]*$" | sed 's/^[[:space:]]*//'
+    }
+    
+    # Main commands
+    opts="list add remove use run export completion reset debug"
+    
+    # Command name completion (first argument)
+    if [ \$COMP_CWORD -eq 1 ]; then
+        COMPREPLY=( \$(compgen -W "\${opts}" -- "\${cur}") )
+        return 0
+    fi
+    
+    # Command-specific completions
+    case "\${prev}" in
+        remove|use)
+            # Complete with registered credential names
+            local creds=\$(_get_creds)
+            COMPREPLY=( \$(compgen -W "\${creds}" -- "\${cur}") )
+            return 0
+            ;;
+        run)
+            # For 'run', we could be at any credential before the command
+            # Check if current word matches any credential
+            local creds=\$(_get_creds)
+            # Always offer credentials first
+            COMPREPLY=( \$(compgen -W "\${creds}" -- "\${cur}") )
+            # If no credential matches, also suggest commands
+            if [ \${#COMPREPLY[@]} -eq 0 ]; then
+                COMPREPLY=( \$(compgen -c -- "\${cur}") )
+            fi
+            return 0
+            ;;
+        completion)
+            # Suggest shell types
+            COMPREPLY=( \$(compgen -W "bash zsh" -- "\${cur}") )
+            return 0
+            ;;
+        add)
+            # Suggest common credential names
+            COMPREPLY=( \$(compgen -W "OPENAI_API_KEY OPENAI_ORGANIZATION HUGGING_FACE_HUB_TOKEN ANTHROPIC_API_KEY COHERE_API_KEY GOOGLE_API_KEY AZURE_OPENAI_API_KEY MISTRAL_API_KEY CLAUDE_API_KEY STABILITYAI_API_KEY" -- "\${cur}") )
+            return 0
+            ;;
+        *)
+            # Check if we're in a 'run' command context
+            if [[ "\${COMP_WORDS[1]}" == "run" ]]; then
+                # If we're past credential, suggest more credentials or commands
+                local creds=\$(_get_creds)
+                # Always offer credentials first
+                COMPREPLY=( \$(compgen -W "\${creds}" -- "\${cur}") )
+                # If no credential matches, also suggest commands
+                if [ \${#COMPREPLY[@]} -eq 0 ]; then
+                    COMPREPLY=( \$(compgen -c -- "\${cur}") )
+                fi
+                return 0
+            fi
+            ;;
+    esac
+    
+    # Default to no completions
+    return 0
+  }
+
+  complete -F _${SCRIPT_NAME}_completion ${SCRIPT_NAME}
+fi
+BASH_COMPLETION
+        elif [ "$SHELL_TYPE" = "zsh" ]; then
+            cat << ZSH_COMPLETION
+# Simplified ZSH completion for ${SCRIPT_NAME}
+if type compdef &>/dev/null; then
+  _${SCRIPT_NAME}() {
+    local curcontext="\$curcontext" state line
+    typeset -A opt_args
+    
+    local -a commands
+    commands=(
+      'list:List all registered credentials'
+      'add:Add a new credential'
+      'remove:Remove a credential'
+      'use:Set or output credential for environment variable'
+      'run:Run command with one or more credentials'
+      'export:Display commands to export all credentials'
+      'completion:Setup shell tab completion'
+      'reset:Reset encryption setup'
+      'debug:Show debug information'
+    )
+    
+    local -a api_keys
+    api_keys=(
+      'OPENAI_API_KEY'
+      'OPENAI_ORGANIZATION'
+      'HUGGING_FACE_HUB_TOKEN'
+      'ANTHROPIC_API_KEY'
+      'COHERE_API_KEY'
+      'GOOGLE_API_KEY'
+      'AZURE_OPENAI_API_KEY'
+      'MISTRAL_API_KEY'
+      'CLAUDE_API_KEY'
+      'STABILITYAI_API_KEY'
+    )
+    
+    _get_creds() {
+      local creds
+      creds=(\$(${SCRIPT_NAME} list 2>/dev/null | grep -v "^Registered" | sed 's/^[[:space:]]*//'))
+      echo \$creds
+    }
+    
+    if (( CURRENT == 2 )); then
+      _describe -t commands '${SCRIPT_NAME} commands' commands
+    elif (( CURRENT >= 3 )); then
+      case "\$words[2]" in
+        add)
+          _describe -t api_keys 'API keys' api_keys
+          ;;
+        remove|use)
+          local creds
+          creds=(\$(_get_creds))
+          _describe -t credentials 'credentials' creds
+          ;;
+        run)
+          local creds
+          creds=(\$(_get_creds))
+          if (( CURRENT == 3 )); then
+            _describe -t credentials 'credentials' creds
+          else
+            _path_commands
+          fi
+          ;;
+        completion)
+          _values 'shell' 'bash' 'zsh'
+          ;;
+        *)
+          # default
+          ;;
+      esac
+    fi
+  }
+  
+  compdef _${SCRIPT_NAME} ${SCRIPT_NAME}
+fi
+ZSH_COMPLETION
+        else
+            echo "# Unsupported shell type: $SHELL_TYPE"
+            echo "# Supported shells: bash, zsh"
+        fi
+        
+        echo "###-end-${SCRIPT_NAME}-completion-###"
+    else
+        # When run directly, output completion code and instructions
+        echo "###-begin-${SCRIPT_NAME}-completion-###"
+        
+        if [ "$SHELL_TYPE" = "bash" ]; then
+            # Bash completion code (same as above)
+            cat << BASH_COMPLETION
+# Bash completion for ${SCRIPT_NAME}
+if type complete &>/dev/null; then
+  _${SCRIPT_NAME}_completion() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="\${COMP_WORDS[COMP_CWORD]}"
+    prev="\${COMP_WORDS[COMP_CWORD-1]}"
+    
+    # Get credentials list (improved version)
+    _get_creds() {
+      ${SCRIPT_NAME} list 2>/dev/null | grep -v "^Registered" | grep -v "^[[:space:]]*$" | sed 's/^[[:space:]]*//'
+    }
+    
+    # Main commands
+    opts="list add remove use run export completion reset debug"
+    
+    # Command name completion (first argument)
+    if [ \$COMP_CWORD -eq 1 ]; then
+        COMPREPLY=( \$(compgen -W "\${opts}" -- "\${cur}") )
+        return 0
+    fi
+    
+    # Command-specific completions
+    case "\${prev}" in
+        remove|use)
+            # Complete with registered credential names
+            local creds=\$(_get_creds)
+            COMPREPLY=( \$(compgen -W "\${creds}" -- "\${cur}") )
+            return 0
+            ;;
+        run)
+            # For 'run', we could be at any credential before the command
+            # Check if current word matches any credential
+            local creds=\$(_get_creds)
+            # Always offer credentials first
+            COMPREPLY=( \$(compgen -W "\${creds}" -- "\${cur}") )
+            # If no credential matches, also suggest commands
+            if [ \${#COMPREPLY[@]} -eq 0 ]; then
+                COMPREPLY=( \$(compgen -c -- "\${cur}") )
+            fi
+            return 0
+            ;;
+        completion)
+            # Suggest shell types
+            COMPREPLY=( \$(compgen -W "bash zsh" -- "\${cur}") )
+            return 0
+            ;;
+        add)
+            # Suggest common credential names
+            COMPREPLY=( \$(compgen -W "OPENAI_API_KEY OPENAI_ORGANIZATION HUGGING_FACE_HUB_TOKEN ANTHROPIC_API_KEY COHERE_API_KEY GOOGLE_API_KEY AZURE_OPENAI_API_KEY MISTRAL_API_KEY CLAUDE_API_KEY STABILITYAI_API_KEY" -- "\${cur}") )
+            return 0
+            ;;
+        *)
+            # Check if we're in a 'run' command context
+            if [[ "\${COMP_WORDS[1]}" == "run" ]]; then
+                # If we're past credential, suggest more credentials or commands
+                local creds=\$(_get_creds)
+                # Always offer credentials first
+                COMPREPLY=( \$(compgen -W "\${creds}" -- "\${cur}") )
+                # If no credential matches, also suggest commands
+                if [ \${#COMPREPLY[@]} -eq 0 ]; then
+                    COMPREPLY=( \$(compgen -c -- "\${cur}") )
+                fi
+                return 0
+            fi
+            ;;
+    esac
+    
+    # Default to no completions
+    return 0
+  }
+
+  complete -F _${SCRIPT_NAME}_completion ${SCRIPT_NAME}
+fi
+BASH_COMPLETION
+        elif [ "$SHELL_TYPE" = "zsh" ]; then
+            # ZSH completion code (same as above)
+            cat << ZSH_COMPLETION
+# Simplified ZSH completion for ${SCRIPT_NAME}
+if type compdef &>/dev/null; then
+  _${SCRIPT_NAME}() {
+    local curcontext="\$curcontext" state line
+    typeset -A opt_args
+    
+    local -a commands
+    commands=(
+      'list:List all registered credentials'
+      'add:Add a new credential'
+      'remove:Remove a credential'
+      'use:Set or output credential for environment variable'
+      'run:Run command with one or more credentials'
+      'export:Display commands to export all credentials'
+      'completion:Setup shell tab completion'
+      'reset:Reset encryption setup'
+      'debug:Show debug information'
+    )
+    
+    local -a api_keys
+    api_keys=(
+      'OPENAI_API_KEY'
+      'OPENAI_ORGANIZATION'
+      'HUGGING_FACE_HUB_TOKEN'
+      'ANTHROPIC_API_KEY'
+      'COHERE_API_KEY'
+      'GOOGLE_API_KEY'
+      'AZURE_OPENAI_API_KEY'
+      'MISTRAL_API_KEY'
+      'CLAUDE_API_KEY'
+      'STABILITYAI_API_KEY'
+    )
+    
+    _get_creds() {
+      local creds
+      creds=(\$(${SCRIPT_NAME} list 2>/dev/null | grep -v "^Registered" | sed 's/^[[:space:]]*//'))
+      echo \$creds
+    }
+    
+    if (( CURRENT == 2 )); then
+      _describe -t commands '${SCRIPT_NAME} commands' commands
+    elif (( CURRENT >= 3 )); then
+      case "\$words[2]" in
+        add)
+          _describe -t api_keys 'API keys' api_keys
+          ;;
+        remove|use)
+          local creds
+          creds=(\$(_get_creds))
+          _describe -t credentials 'credentials' creds
+          ;;
+        run)
+          local creds
+          creds=(\$(_get_creds))
+          if (( CURRENT == 3 )); then
+            _describe -t credentials 'credentials' creds
+          else
+            _path_commands
+          fi
+          ;;
+        completion)
+          _values 'shell' 'bash' 'zsh'
+          ;;
+        *)
+          # default
+          ;;
+      esac
+    fi
+  }
+  
+  compdef _${SCRIPT_NAME} ${SCRIPT_NAME}
+fi
+ZSH_COMPLETION
+        else
+            echo "# Unsupported shell type: $SHELL_TYPE"
+            echo "# Supported shells: bash, zsh"
+        fi
+        
+        echo "###-end-${SCRIPT_NAME}-completion-###"
+        
+        # Show instructions when run directly
+        echo ""
+        echo "# To enable completion, redirect the above output as follows:"
+        echo "# $SCRIPT_NAME completion $SHELL_TYPE >> ~/.${SHELL_TYPE}rc"
+        echo ""
+        echo "# Or, run the following commands:"
+        echo "echo \"if command -v $SCRIPT_NAME >/dev/null 2>&1; then\" >> ~/.${SHELL_TYPE}rc"
+        echo "echo \"  source <($SCRIPT_NAME completion $SHELL_TYPE)\" >> ~/.${SHELL_TYPE}rc"
+        echo "echo \"fi\" >> ~/.${SHELL_TYPE}rc"
+        echo ""
+        echo "# Then restart your shell or run 'source ~/.${SHELL_TYPE}rc' to enable completion."
+    fi
+}
+
+# Initialize encryption system
+init_encryption
+
+# Debug information
+show_debug_info() {
+    echo "AI API Credentials Manager - Debug Information"
+    echo "=============================================="
+    echo "Script version: 1.0.0 (Security Enhanced)"
+    echo ""
+    
+    echo "Directory Information:"
+    echo "  CONFIG_DIR: ${CONFIG_DIR}"
+    echo "  Exists: $([ -d "${CONFIG_DIR}" ] && echo "Yes" || echo "No")"
+    echo "  Permissions: $(ls -ld "${CONFIG_DIR}" 2>/dev/null || echo "Unable to determine")"
+    echo ""
+    
+    echo "File Information:"
+    echo "  CRED_FILE: ${CRED_FILE}"
+    echo "  Exists: $([ -f "${CRED_FILE}" ] && echo "Yes" || echo "No")"
+    echo "  Size: $([ -f "${CRED_FILE}" ] && stat -f %z "${CRED_FILE}" 2>/dev/null || stat -c %s "${CRED_FILE}" 2>/dev/null || echo "Unknown")"
+    echo "  Permissions: $(ls -l "${CRED_FILE}" 2>/dev/null || echo "File does not exist")"
+    echo ""
+    
+    echo "  KEY_FILE: ${KEY_FILE}"
+    echo "  Exists: $([ -f "${KEY_FILE}" ] && echo "Yes" || echo "No")"
+    echo "  Size: $([ -f "${KEY_FILE}" ] && stat -f %z "${KEY_FILE}" 2>/dev/null || stat -c %s "${KEY_FILE}" 2>/dev/null || echo "Unknown")"
+    echo "  Permissions: $(ls -l "${KEY_FILE}" 2>/dev/null || echo "File does not exist")"
+    echo ""
+    
+    echo "  LOG_FILE: ${LOG_FILE}"
+    echo "  Exists: $([ -f "${LOG_FILE}" ] && echo "Yes" || echo "No")"
+    echo "  Size: $([ -f "${LOG_FILE}" ] && stat -f %z "${LOG_FILE}" 2>/dev/null || stat -c %s "${LOG_FILE}" 2>/dev/null || echo "Unknown")"
+    echo "  Permissions: $(ls -l "${LOG_FILE}" 2>/dev/null || echo "File does not exist")"
+    echo ""
+    
+    echo "Last 10 log entries:"
+    if [ -f "${LOG_FILE}" ]; then
+        tail -n 10 "${LOG_FILE}" 2>/dev/null || echo "Unable to read log file"
+    else
+        echo "  Log file does not exist"
+    fi
+    echo ""
+    
+    echo "System Information:"
+    echo "  OpenSSL version: $(openssl version 2>/dev/null || echo "OpenSSL not found")"
+    echo "  Bash version: ${BASH_VERSION}"
+    echo "  User: $(whoami)"
+    echo "  Operating System: $(uname -s)"
+    echo "  Shell: ${SHELL}"
+    echo ""
+    
+    echo "Registered Credentials (names only):"
+    list_creds
+}
+
+# Reset encryption setup
+reset_encryption() {
+    log "INFO" "Resetting encryption setup"
+    
+    # Backup existing files
+    local backup_time
+    backup_time=$(date +%Y%m%d%H%M%S)
+    
+    if [ -f "${CRED_FILE}" ]; then
+        cp "${CRED_FILE}" "${CRED_FILE}.${backup_time}.bak"
+    fi
+    
+    if [ -f "${KEY_FILE}" ]; then
+        cp "${KEY_FILE}" "${KEY_FILE}.${backup_time}.bak"
+    fi
+    
+    # Remove existing files
+    rm -f "${CRED_FILE}" "${KEY_FILE}"
+    
+    # Create new encryption setup
+    log "INFO" "Creating new encryption setup"
+    
+    # Generate new key
+    openssl rand -base64 32 > "${KEY_FILE}"
+    chmod 600 "${KEY_FILE}"
+    
+    # Create empty credentials file
+    touch "${CRED_FILE}"
+    chmod 600 "${CRED_FILE}"
+    
+    echo "Encryption setup has been reset."
+    echo "Any existing credentials have been backed up with the suffix .${backup_time}.bak"
+    echo "You'll need to re-add your credentials."
+}
+
+# Main processing - only execute if arguments are provided
+if [ -n "${1:-}" ]; then
+    case "${1}" in
+        list)
+            list_creds
+            ;;
+        add)
+            add_cred "${2:-}" "${3:-}"
+            ;;
+        remove)
+            remove_cred "${2:-}"
+            ;;
+        use)
+            use_cred "${2:-}"
+            ;;
+        run)
+            # Always use the multiple credentials function which handles both single and multiple credentials
+            run_with_multiple_creds "${@:2}"
+            ;;
+        export)
+            export_creds
+            ;;
+        completion)
+            setup_completion "$@"
+            ;;
+        rotate-key)
+            rotate_key
+            ;;
+        debug)
+            show_debug_info
+            ;;
+        reset)
+            reset_encryption
+            ;;
+        *)
+            usage
+            ;;
+    esac
+else
+    # No arguments provided
+    if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+        # Being sourced without arguments - only define functions, don't display usage
+        echo "AI API Credentials Manager loaded. Use with a command like: use OPENAI_API_KEY"
+    else
+        # Normal execution without arguments - display usage
+        usage
+    fi
+fi
