@@ -953,14 +953,32 @@ ZSH_COMPLETION
         # Show instructions when run directly
         echo ""
         echo "# To enable completion, redirect the above output as follows:"
-        echo "# $SCRIPT_NAME completion $SHELL_TYPE >> ~/.${SHELL_TYPE}rc"
+        
+        if [ "$SHELL_TYPE" = "zsh" ]; then
+            # For zsh, respect ZDOTDIR if set
+            echo "# $SCRIPT_NAME completion $SHELL_TYPE >> \${ZDOTDIR:-\$HOME}/.${SHELL_TYPE}rc"
+            echo ""
+            echo "# Or, run the following commands:"
+            echo "echo \"if command -v $SCRIPT_NAME >/dev/null 2>&1; then\" >> \${ZDOTDIR:-\$HOME}/.${SHELL_TYPE}rc"
+            echo "echo \"  source <($SCRIPT_NAME completion $SHELL_TYPE)\" >> \${ZDOTDIR:-\$HOME}/.${SHELL_TYPE}rc"
+            echo "echo \"fi\" >> \${ZDOTDIR:-\$HOME}/.${SHELL_TYPE}rc"
+        else
+            # For bash and others, use standard HOME directory
+            echo "# $SCRIPT_NAME completion $SHELL_TYPE >> \$HOME/.${SHELL_TYPE}rc"
+            echo ""
+            echo "# Or, run the following commands:"
+            echo "echo \"if command -v $SCRIPT_NAME >/dev/null 2>&1; then\" >> \$HOME/.${SHELL_TYPE}rc"
+            echo "echo \"  source <($SCRIPT_NAME completion $SHELL_TYPE)\" >> \$HOME/.${SHELL_TYPE}rc"
+            echo "echo \"fi\" >> \$HOME/.${SHELL_TYPE}rc"
+        fi
+        
         echo ""
-        echo "# Or, run the following commands:"
-        echo "echo \"if command -v $SCRIPT_NAME >/dev/null 2>&1; then\" >> ~/.${SHELL_TYPE}rc"
-        echo "echo \"  source <($SCRIPT_NAME completion $SHELL_TYPE)\" >> ~/.${SHELL_TYPE}rc"
-        echo "echo \"fi\" >> ~/.${SHELL_TYPE}rc"
-        echo ""
-        echo "# Then restart your shell or run 'source ~/.${SHELL_TYPE}rc' to enable completion."
+        
+        if [ "$SHELL_TYPE" = "zsh" ]; then
+            echo "# Then restart your shell or run 'source \${ZDOTDIR:-\$HOME}/.${SHELL_TYPE}rc' to enable completion."
+        else
+            echo "# Then restart your shell or run 'source \$HOME/.${SHELL_TYPE}rc' to enable completion."
+        fi
     fi
 }
 
