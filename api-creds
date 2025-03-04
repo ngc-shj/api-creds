@@ -612,8 +612,44 @@ setup_completion() {
     local SCRIPT_NAME
     SCRIPT_NAME="$(basename "$0")"
     
+    local ARG="${2:-}"
+    
+    if [ "$ARG" = "--help" ] || [ "$ARG" = "-h" ] || [ -z "$ARG" ]; then
+        cat << HELP_TEXT
+Completion setup for ${SCRIPT_NAME}
+
+Usage:
+  ${SCRIPT_NAME} completion bash     - Generate Bash completion code
+  ${SCRIPT_NAME} completion zsh      - Generate Zsh completion code
+  ${SCRIPT_NAME} completion --help   - Display this help message
+
+To enable completion in your shell:
+
+Bash:
+  ${SCRIPT_NAME} completion bash > ~/.bash_completion.d/${SCRIPT_NAME}
+  # Then add to ~/.bashrc:
+  # if [ -d ~/.bash_completion.d ]; then
+  #   for file in ~/.bash_completion.d/*; do
+  #     source "\$file"
+  #   done
+  # fi
+
+Zsh:
+  ${SCRIPT_NAME} completion zsh > ~/.zsh_completion.d/_${SCRIPT_NAME}
+  # Then add to ~/.zshrc:
+  # fpath=(~/.zsh_completion.d \$fpath)
+  # autoload -U compinit && compinit
+
+Or simply add to your shell config:
+  if command -v ${SCRIPT_NAME} >/dev/null 2>&1; then
+    source <(${SCRIPT_NAME} completion bash)  # Or zsh
+  fi
+HELP_TEXT
+        return 0
+    fi
+   
     # Detect shell type
-    local SHELL_TYPE="${2:-}"
+    local SHELL_TYPE="$ARG"
     if [ -z "$SHELL_TYPE" ]; then
         if [ -n "$ZSH_VERSION" ]; then
             SHELL_TYPE="zsh"
@@ -622,13 +658,11 @@ setup_completion() {
         fi
     fi
     
-    # When being sourced, only output the completion code without instructions
-    if [ "${BASH_SOURCE[0]}" != "$0" ]; then
-        # Output completion code to standard output
-        echo "###-begin-${SCRIPT_NAME}-completion-###"
-        
-        if [ "$SHELL_TYPE" = "bash" ]; then
-            cat << BASH_COMPLETION
+    # Output completion code to standard output
+    echo "###-begin-${SCRIPT_NAME}-completion-###"
+    
+    if [ "$SHELL_TYPE" = "bash" ]; then
+        cat << BASH_COMPLETION
 # Bash completion for ${SCRIPT_NAME}
 if type complete &>/dev/null; then
   _${SCRIPT_NAME}_completion() {
@@ -704,8 +738,8 @@ if type complete &>/dev/null; then
   complete -F _${SCRIPT_NAME}_completion ${SCRIPT_NAME}
 fi
 BASH_COMPLETION
-        elif [ "$SHELL_TYPE" = "zsh" ]; then
-            cat << ZSH_COMPLETION
+    elif [ "$SHELL_TYPE" = "zsh" ]; then
+        cat << ZSH_COMPLETION
 # Simplified ZSH completion for ${SCRIPT_NAME}
 if type compdef &>/dev/null; then
   _${SCRIPT_NAME}() {
@@ -779,206 +813,11 @@ if type compdef &>/dev/null; then
   compdef _${SCRIPT_NAME} ${SCRIPT_NAME}
 fi
 ZSH_COMPLETION
-        else
-            echo "# Unsupported shell type: $SHELL_TYPE"
-            echo "# Supported shells: bash, zsh"
-        fi
-        
-        echo "###-end-${SCRIPT_NAME}-completion-###"
     else
-        # When run directly, output completion code and instructions
-        echo "###-begin-${SCRIPT_NAME}-completion-###"
-        
-        if [ "$SHELL_TYPE" = "bash" ]; then
-            # Bash completion code (same as above)
-            cat << BASH_COMPLETION
-# Bash completion for ${SCRIPT_NAME}
-if type complete &>/dev/null; then
-  _${SCRIPT_NAME}_completion() {
-    local cur prev opts
-    COMPREPLY=()
-    cur="\${COMP_WORDS[COMP_CWORD]}"
-    prev="\${COMP_WORDS[COMP_CWORD-1]}"
-    
-    # Get credentials list (improved version)
-    _get_creds() {
-      ${SCRIPT_NAME} list 2>/dev/null | grep -v "^Registered" | grep -v "^[[:space:]]*$" | sed 's/^[[:space:]]*//'
-    }
-    
-    # Main commands
-    opts="list add remove use run export completion reset debug"
-    
-    # Command name completion (first argument)
-    if [ \$COMP_CWORD -eq 1 ]; then
-        COMPREPLY=( \$(compgen -W "\${opts}" -- "\${cur}") )
-        return 0
-    fi
-    
-    # Command-specific completions
-    case "\${prev}" in
-        remove|use)
-            # Complete with registered credential names
-            local creds=\$(_get_creds)
-            COMPREPLY=( \$(compgen -W "\${creds}" -- "\${cur}") )
-            return 0
-            ;;
-        run)
-            # For 'run', we could be at any credential before the command
-            # Check if current word matches any credential
-            local creds=\$(_get_creds)
-            # Always offer credentials first
-            COMPREPLY=( \$(compgen -W "\${creds}" -- "\${cur}") )
-            # If no credential matches, also suggest commands
-            if [ \${#COMPREPLY[@]} -eq 0 ]; then
-                COMPREPLY=( \$(compgen -c -- "\${cur}") )
-            fi
-            return 0
-            ;;
-        completion)
-            # Suggest shell types
-            COMPREPLY=( \$(compgen -W "bash zsh" -- "\${cur}") )
-            return 0
-            ;;
-        add)
-            # Suggest common credential names
-            COMPREPLY=( \$(compgen -W "OPENAI_API_KEY OPENAI_ORGANIZATION HUGGING_FACE_HUB_TOKEN ANTHROPIC_API_KEY COHERE_API_KEY GOOGLE_API_KEY AZURE_OPENAI_API_KEY MISTRAL_API_KEY CLAUDE_API_KEY STABILITYAI_API_KEY" -- "\${cur}") )
-            return 0
-            ;;
-        *)
-            # Check if we're in a 'run' command context
-            if [[ "\${COMP_WORDS[1]}" == "run" ]]; then
-                # If we're past credential, suggest more credentials or commands
-                local creds=\$(_get_creds)
-                # Always offer credentials first
-                COMPREPLY=( \$(compgen -W "\${creds}" -- "\${cur}") )
-                # If no credential matches, also suggest commands
-                if [ \${#COMPREPLY[@]} -eq 0 ]; then
-                    COMPREPLY=( \$(compgen -c -- "\${cur}") )
-                fi
-                return 0
-            fi
-            ;;
-    esac
-    
-    # Default to no completions
-    return 0
-  }
-
-  complete -F _${SCRIPT_NAME}_completion ${SCRIPT_NAME}
-fi
-BASH_COMPLETION
-        elif [ "$SHELL_TYPE" = "zsh" ]; then
-            # ZSH completion code (same as above)
-            cat << ZSH_COMPLETION
-# Simplified ZSH completion for ${SCRIPT_NAME}
-if type compdef &>/dev/null; then
-  _${SCRIPT_NAME}() {
-    local curcontext="\$curcontext" state line
-    typeset -A opt_args
-    
-    local -a commands
-    commands=(
-      'list:List all registered credentials'
-      'add:Add a new credential'
-      'remove:Remove a credential'
-      'use:Set or output credential for environment variable'
-      'run:Run command with one or more credentials'
-      'export:Display commands to export all credentials'
-      'completion:Setup shell tab completion'
-      'reset:Reset encryption setup'
-      'debug:Show debug information'
-    )
-    
-    local -a api_keys
-    api_keys=(
-      'OPENAI_API_KEY'
-      'OPENAI_ORGANIZATION'
-      'HUGGING_FACE_HUB_TOKEN'
-      'ANTHROPIC_API_KEY'
-      'COHERE_API_KEY'
-      'GOOGLE_API_KEY'
-      'AZURE_OPENAI_API_KEY'
-      'MISTRAL_API_KEY'
-      'CLAUDE_API_KEY'
-      'STABILITYAI_API_KEY'
-    )
-    
-    _get_creds() {
-      local creds
-      creds=(\$(${SCRIPT_NAME} list 2>/dev/null | grep -v "^Registered" | sed 's/^[[:space:]]*//'))
-      echo \$creds
-    }
-    
-    if (( CURRENT == 2 )); then
-      _describe -t commands '${SCRIPT_NAME} commands' commands
-    elif (( CURRENT >= 3 )); then
-      case "\$words[2]" in
-        add)
-          _describe -t api_keys 'API keys' api_keys
-          ;;
-        remove|use)
-          local creds
-          creds=(\$(_get_creds))
-          _describe -t credentials 'credentials' creds
-          ;;
-        run)
-          local creds
-          creds=(\$(_get_creds))
-          if (( CURRENT == 3 )); then
-            _describe -t credentials 'credentials' creds
-          else
-            _path_commands
-          fi
-          ;;
-        completion)
-          _values 'shell' 'bash' 'zsh'
-          ;;
-        *)
-          # default
-          ;;
-      esac
-    fi
-  }
-  
-  compdef _${SCRIPT_NAME} ${SCRIPT_NAME}
-fi
-ZSH_COMPLETION
-        else
-            echo "# Unsupported shell type: $SHELL_TYPE"
-            echo "# Supported shells: bash, zsh"
-        fi
-        
-        echo "###-end-${SCRIPT_NAME}-completion-###"
-        
-        # Show instructions when run directly
-        echo ""
-        echo "# To enable completion, redirect the above output as follows:"
-        
-        if [ "$SHELL_TYPE" = "zsh" ]; then
-            # For zsh, respect ZDOTDIR if set
-            echo "# $SCRIPT_NAME completion $SHELL_TYPE >> \${ZDOTDIR:-\$HOME}/.${SHELL_TYPE}rc"
-            echo ""
-            echo "# Or, run the following commands:"
-            echo "echo \"if command -v $SCRIPT_NAME >/dev/null 2>&1; then\" >> \${ZDOTDIR:-\$HOME}/.${SHELL_TYPE}rc"
-            echo "echo \"  source <($SCRIPT_NAME completion $SHELL_TYPE)\" >> \${ZDOTDIR:-\$HOME}/.${SHELL_TYPE}rc"
-            echo "echo \"fi\" >> \${ZDOTDIR:-\$HOME}/.${SHELL_TYPE}rc"
-        else
-            # For bash and others, use standard HOME directory
-            echo "# $SCRIPT_NAME completion $SHELL_TYPE >> \$HOME/.${SHELL_TYPE}rc"
-            echo ""
-            echo "# Or, run the following commands:"
-            echo "echo \"if command -v $SCRIPT_NAME >/dev/null 2>&1; then\" >> \$HOME/.${SHELL_TYPE}rc"
-            echo "echo \"  source <($SCRIPT_NAME completion $SHELL_TYPE)\" >> \$HOME/.${SHELL_TYPE}rc"
-            echo "echo \"fi\" >> \$HOME/.${SHELL_TYPE}rc"
-        fi
-        
-        echo ""
-        
-        if [ "$SHELL_TYPE" = "zsh" ]; then
-            echo "# Then restart your shell or run 'source \${ZDOTDIR:-\$HOME}/.${SHELL_TYPE}rc' to enable completion."
-        else
-            echo "# Then restart your shell or run 'source \$HOME/.${SHELL_TYPE}rc' to enable completion."
-        fi
+        echo "Error: Unsupported shell type: $SHELL_TYPE" >&2
+        echo "Supported shells: bash, zsh" >&2
+        echo "Run '${SCRIPT_NAME} completion --help' for usage information." >&2
+        return 1
     fi
 }
 
