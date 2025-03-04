@@ -13,12 +13,12 @@ fi
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
-CONFIG_DIR="${XDG_CONFIG_HOME}/api_creds"
-DATA_DIR="${XDG_DATA_HOME}/api_creds"
-STATE_DIR="${XDG_STATE_HOME}/api_creds"
+CONFIG_DIR="${XDG_CONFIG_HOME}/api-creds"
+DATA_DIR="${XDG_DATA_HOME}/api-creds"
+STATE_DIR="${XDG_STATE_HOME}/api-creds"
 CRED_FILE="${CONFIG_DIR}/credentials.enc"  # Encrypted file
 KEY_FILE="${DATA_DIR}/.master.key"  # Master key file
-LOG_FILE="${STATE_DIR}/api_creds.log"  # Add logging
+LOG_FILE="${STATE_DIR}/api-creds.log"  # Add logging
 
 # Create directories if they don't exist
 mkdir -p "${CONFIG_DIR}" "${DATA_DIR}" "${STATE_DIR}"
@@ -45,7 +45,7 @@ fi
 
 # Function to securely create temporary files
 create_secure_temp() {
-    mktemp -t "api_creds.XXXXXX"
+    mktemp -t "api-creds.XXXXXX"
 }
 
 # Initialize encryption if needed
