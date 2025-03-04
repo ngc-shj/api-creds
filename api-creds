@@ -192,7 +192,7 @@ Usage:
   $(basename "$0") use <var_name>           - Set specified credential as environment variable
   $(basename "$0") run <var_name(s)> <cmd>  - Run command with one or more credentials
   $(basename "$0") export                   - Display commands to export all credentials
-  $(basename "$0") completion [shell] - Setup tab completion (bash or zsh)
+  $(basename "$0") completion [shell]       - Setup tab completion (bash or zsh)
   $(basename "$0") rotate-key               - Rotate encryption key (recommended periodically)
 
 Examples:
